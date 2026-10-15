@@ -23,14 +23,15 @@ from ..map_server import MapServer
 from ..scanner import Scanner
 from ..settings import Settings
 from ..watcher import FolderWatcher
+from .calendar_page import CalendarPage
 from .dialogs import (DupGroupDialog, FoldersDialog, SettingsDialog,
                       TrashDialog, UsersDialog)
 from .icons import icon as make_icon
 from .style import TEXT_SECONDARY, user_color
 from .timeline_wall import TimelineWall
 from .viewer_window import ViewerWindow
-from .widgets import (AnimatedComboBox, FramelessWindow, ScanThread, TitleBar,
-                      color_icon)
+from .widgets import (AnimatedComboBox, FramelessWindow, ScanThread,
+                      SimilarThread, TitleBar, color_icon)
 
 
 class MainWindow(FramelessWindow):
@@ -43,8 +44,10 @@ class MainWindow(FramelessWindow):
         self.scanner = Scanner(db, self.thumb_dir)
         self._current_photos = []
         self._scan_thread = None
+        self._similar_thread = None
         self._pending_scan = []
         self._auto_scan = False
+        self._day = None
         self.watcher = None
         self.settings = Settings(self.data_dir / "settings.json")
         self._mode = "map"          # map | all | dups | user
@@ -70,6 +73,7 @@ class MainWindow(FramelessWindow):
         # 自动监控数据源文件夹 + 启动自动扫描
         self._setup_watcher()
         QTimer.singleShot(1500, self._startup_scan)
+        QTimer.singleShot(4000, self._refresh_similar)
 
     def _watchdog_tick(self):
         st = self.db.stats()
@@ -109,8 +113,10 @@ class MainWindow(FramelessWindow):
         s.addWidget(h1)
         self.btn_map = self._side_button("地图", "map")
         self.btn_all = self._side_button("全部照片", "images")
+        self.btn_calendar = self._side_button("日历", "calendar-days")
         s.addWidget(self.btn_map)
         s.addWidget(self.btn_all)
+        s.addWidget(self.btn_calendar)
 
         h2 = QLabel("家人")
         h2.setObjectName("sideHeader")
@@ -119,8 +125,10 @@ class MainWindow(FramelessWindow):
         self.view_btn_group.setExclusive(True)
         self.view_btn_group.addButton(self.btn_map)
         self.view_btn_group.addButton(self.btn_all)
+        self.view_btn_group.addButton(self.btn_calendar)
         self.btn_map.clicked.connect(lambda: self._set_mode("map"))
         self.btn_all.clicked.connect(lambda: self._set_mode("all"))
+        self.btn_calendar.clicked.connect(lambda: self._set_mode("calendar"))
         self.btn_map.setChecked(True)
 
         # 家人树：点开带展开动画，子项为 所有照片/收藏/有定位/无定位
@@ -261,6 +269,11 @@ class MainWindow(FramelessWindow):
         else:
             self.stack.addWidget(self.map_page)
 
+        # 日历页
+        self.calendar_page = CalendarPage(self.db)
+        self.calendar_page.day_selected.connect(self._on_day_selected)
+        self.stack.addWidget(self.calendar_page)
+
         r.addWidget(self.stack, 1)
         root.addWidget(right, 1)
         self.setCentralWidget(central)
@@ -330,7 +343,8 @@ class MainWindow(FramelessWindow):
                                        ("收藏", "fav", "heart"),
                                        ("有地理定位", "gps", "location-dot"),
                                        ("无地理定位", "nogps", "ban"),
-                                       ("重复照片", "dup", "clone")):
+                                       ("重复照片", "dup", "clone"),
+                                       ("相似照片", "similar", "magnifying-glass")):
                     child = QTreeWidgetItem([label])
                     child.setIcon(0, make_icon(ic, "#86868B", 15))
                     child.setData(0, Qt.ItemDataRole.UserRole + 1, u["id"])
@@ -352,6 +366,8 @@ class MainWindow(FramelessWindow):
             self.btn_map.setChecked(True)
         elif self._mode == "all":
             self.btn_all.setChecked(True)
+        elif self._mode in ("calendar", "day"):
+            self.btn_calendar.setChecked(True)
 
         if not self.db.list_users():
             self.empty_label.setText("欢迎使用家庭相册 👋\n\n第一步：添加家人（每位家人一个账号）\n"
@@ -386,7 +402,7 @@ class MainWindow(FramelessWindow):
             item.setExpanded(not item.isExpanded())
             self.user_tree.scrollToItem(item)
             self._set_mode("user", uid, "all")
-        elif kind in ("all", "fav", "gps", "nogps", "dup", "video"):
+        elif kind in ("all", "fav", "gps", "nogps", "dup", "video", "similar"):
             self._set_mode("user", uid, kind)
 
     def _set_mode(self, mode, arg=None, sub=None):
@@ -397,6 +413,18 @@ class MainWindow(FramelessWindow):
 
     def refresh_view(self):
         st = self.db.stats()
+
+        # ---- 日历模式 ----
+        if self._mode == "calendar":
+            self.title_label.setText("日历")
+            self.subtitle_label.setText("点击有照片的日期，查看当天的照片与视频")
+            if not self.db.list_users():
+                self.stack.setCurrentWidget(self.empty_page)
+                return
+            self.calendar_page.reload()
+            self.stack.setCurrentWidget(self.calendar_page)
+            self._update_status()
+            return
 
         # ---- 地图模式（主页） ----
         if self._mode == "map":
@@ -419,10 +447,13 @@ class MainWindow(FramelessWindow):
             self.title_label.setText("全部照片")
         elif self._mode == "dups":
             self.title_label.setText("重复照片")
+        elif self._mode == "day":
+            self.title_label.setText(f"{self._day or ''} 的照片")
         else:
             name = next((u["name"] for u in st["per_user"] if u["id"] == self._mode_arg), "家人")
             sub_names = {"all": "所有照片", "video": "视频", "fav": "收藏",
-                         "gps": "有地理定位", "nogps": "无地理定位", "dup": "重复照片"}
+                         "gps": "有地理定位", "nogps": "无地理定位",
+                         "dup": "重复照片", "similar": "相似照片"}
             sub_name = sub_names.get(self._mode_sub, "照片")
             self.title_label.setText(f"{name} · {sub_name}")
 
@@ -437,7 +468,16 @@ class MainWindow(FramelessWindow):
         time_filter = self.time_combo.currentData()
         now = dt.datetime.now()
         kwargs = {}
-        self.btn_dup_review.setVisible(self._mode == "user" and self._mode_sub == "dup")
+        # 「处理」按钮：重复照片 / 相似照片 两种视图下出现
+        show_review = self._mode == "user" and self._mode_sub in ("dup", "similar")
+        self.btn_dup_review.setVisible(show_review)
+        if show_review:
+            if self._mode_sub == "similar":
+                self.btn_dup_review.setText("处理相似照片…")
+                self.btn_dup_review.setIcon(make_icon("magnifying-glass", "#FFFFFF", 15))
+            else:
+                self.btn_dup_review.setText("处理重复照片…")
+                self.btn_dup_review.setIcon(make_icon("clone", "#FFFFFF", 15))
         if self._mode == "user":
             kwargs["user_id"] = self._mode_arg
             if self._mode_sub == "fav":
@@ -448,8 +488,13 @@ class MainWindow(FramelessWindow):
                 kwargs["has_gps"] = False
             elif self._mode_sub == "dup":
                 kwargs["dup_only"] = True
+            elif self._mode_sub == "similar":
+                kwargs["similar_only"] = True
             elif self._mode_sub == "video":
                 kwargs["video_only"] = True
+        if self._mode == "day" and self._day:
+            kwargs["date_from"] = self._day
+            kwargs["date_to"] = self._day
         if time_filter == "year":
             kwargs["year"] = now.year
         elif time_filter == "month":
@@ -478,12 +523,17 @@ class MainWindow(FramelessWindow):
             if self._mode_sub == "dup":
                 self.subtitle_label.setText(
                     f"共 {len(photos)} 张重复待处理 · 内容完全相同的照片建议每组保留一张")
+            elif self._mode_sub == "similar":
+                self.subtitle_label.setText(
+                    f"共 {len(photos)} 张疑似相似 · 点右上角「处理相似照片…」逐组确认")
             else:
                 self.subtitle_label.setText(
                     f"共 {len(photos)} 张 · 有定位 {sum(1 for p in photos if p.get('lat'))} 张")
         else:
             if self._mode_sub == "dup":
                 self.empty_label.setText("🎉 没有待处理的重复照片")
+            elif self._mode_sub == "similar":
+                self.empty_label.setText("🎉 没有待处理的相似照片\n\n（灵敏度可在「设置…」里调整）")
             else:
                 self.empty_label.setText("没有符合条件的照片")
             self.empty_btn.setVisible(False)
@@ -655,6 +705,9 @@ class MainWindow(FramelessWindow):
         if self.watcher is not None:
             self.watcher.refresh_dirs()
         self.refresh_all()
+        # 有新照片时重新计算相似组
+        if result.get("new"):
+            self._refresh_similar()
         if self._pending_scan:
             pending = self._pending_scan
             self._pending_scan = []
@@ -718,10 +771,41 @@ class MainWindow(FramelessWindow):
         self.refresh_all()
 
     def _open_dup_dialog(self):
-        dlg = DupGroupDialog(self.db, self.trash_dir, self)
+        kind = "similar" if self._mode_sub == "similar" else "exact"
+        dlg = DupGroupDialog(self.db, self.trash_dir, self, kind=kind)
         dlg.changed.connect(self.refresh_all)
         dlg.exec()
         self.refresh_all()
+
+    # ==================================================================
+    # 相似照片
+    # ==================================================================
+    def _refresh_similar(self):
+        """后台补算感知哈希并重新聚类（不阻塞界面）。"""
+        if self._similar_thread is not None and self._similar_thread.isRunning():
+            return
+        try:
+            threshold = int(self.settings.get("similar_threshold") or 4)
+        except (TypeError, ValueError):
+            threshold = 4
+        self._similar_thread = SimilarThread(self.db, threshold, self)
+        self._similar_thread.progress.connect(self.scan_status_label.setText)
+        self._similar_thread.finished_ok.connect(self._on_similar_done)
+        self._similar_thread.failed.connect(
+            lambda msg: self.scan_status_label.setText("相似照片计算失败：" + msg))
+        self._similar_thread.start()
+
+    def _on_similar_done(self, stat):
+        self.scan_status_label.setText(
+            f"相似照片：{stat.get('groups', 0)} 组 / {stat.get('photos', 0)} 张待确认")
+        self.refresh_all()
+
+    def _on_day_selected(self, day: str):
+        """日历点选某天 → 只看这一天的照片。"""
+        self._day = day
+        self._mode = "day"
+        self._mode_sub = None
+        self.refresh_view()
 
     def _open_folders(self):
         dlg = FoldersDialog(self.db, self.scanner, self)

@@ -6,6 +6,7 @@ DEFAULTS = {
     "auto_watch": True,           # 自动监控数据源文件夹，发现新文件即扫描
     "auto_scan_on_start": True,   # 启动时自动增量扫描一次
     "clean_missing": True,        # 扫描后清理磁盘上已不存在的记录
+    "similar_threshold": 4,       # 相似照片判定阈值（汉明距离，越小越严格）
 }
 
 
@@ -36,5 +37,5 @@ class Settings:
         return self.data.get(key, DEFAULTS.get(key, default))
 
     def set(self, key, value):
-        self.data[key] = bool(value)
+        self.data[key] = value
         self.save()

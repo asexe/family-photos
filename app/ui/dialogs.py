@@ -361,13 +361,17 @@ class MemberCard(QFrame):
 
 
 class DupGroupDialog(AppleDialog):
+    """重复/相似照片处理。kind='exact' 完全相同；kind='similar' 看起来相似。"""
+
     changed = Signal()
 
-    def __init__(self, db: Database, trash_dir, parent=None):
+    def __init__(self, db: Database, trash_dir, parent=None, kind: str = "exact"):
         super().__init__(parent)
         self.db = db
         self.trash_dir = trash_dir
-        self.setWindowTitle("重复照片")
+        self.kind = kind
+        similar = kind == "similar"
+        self.setWindowTitle("相似照片" if similar else "重复照片")
         self.setModal(True)
         self.resize(1080, 720)
 
@@ -377,10 +381,15 @@ class DupGroupDialog(AppleDialog):
 
         # 左：重复组列表
         left = QVBoxLayout()
-        title = QLabel("重复照片")
+        title = QLabel("相似照片" if similar else "重复照片")
         title.setObjectName("dialogTitle")
         left.addWidget(title)
-        hint = QLabel("内容完全相同的照片已归为一组，建议每组保留一张，其余移入回收站（可恢复）。")
+        if similar:
+            hint_text = ("这些照片看起来很像（感知哈希相近），常见于连拍、微信压缩版、二次保存。\n"
+                         "请人工确认后再删除；误报可点「忽略此组」不再提示。")
+        else:
+            hint_text = "内容完全相同的照片已归为一组，建议每组保留一张，其余移入回收站（可恢复）。"
+        hint = QLabel(hint_text)
         hint.setStyleSheet(f"color: {TEXT_SECONDARY};")
         hint.setWordWrap(True)
         left.addWidget(hint)
@@ -420,10 +429,16 @@ class DupGroupDialog(AppleDialog):
             " QPushButton:disabled { background: #F5A9A5; }")
         self.btn_resolve.clicked.connect(self._resolve)
         btns.addWidget(self.btn_resolve)
+        if self.kind == "similar":
+            self.btn_ignore = QPushButton("忽略此组")
+            self.btn_ignore.setObjectName("ghost")
+            self.btn_ignore.setToolTip("这不是相似照片，之后不再提示这一组")
+            self.btn_ignore.clicked.connect(self._ignore)
+            btns.addWidget(self.btn_ignore)
         right.addLayout(btns)
         lay.addLayout(right, 1)
 
-        self.groups = self.db.pending_dup_groups()
+        self.groups = self.db.pending_dup_groups(kind=self.kind)
         self._button_group = None
         self._cards = []
         self._reload_list()
@@ -437,9 +452,29 @@ class DupGroupDialog(AppleDialog):
             photos = self.db.dup_group_photos(g["id"])
             if photos and photos[0].get("taken_at"):
                 date = photos[0]["taken_at"][:10] + "　"
-            item = QListWidgetItem(f"{date}{g['count']} 张完全相同")
+            label = "张看起来相似" if self.kind == "similar" else "张完全相同"
+            item = QListWidgetItem(f"{date}{g['count']} {label}")
             item.setData(Qt.ItemDataRole.UserRole, g)
             self.group_list.addItem(item)
+
+    def _ignore(self):
+        """标记为「不是相似照片」，之后重算也不再提示这一组。"""
+        item = self.group_list.currentItem()
+        if not item:
+            return
+        g = item.data(Qt.ItemDataRole.UserRole)
+        ids = sorted(g.get("photo_ids") or [])
+        if ids:
+            self.db.add_similar_ignored(",".join(str(x) for x in ids))
+        self.db.resolve_dup_group(g["id"], -1)
+        self.groups = self.db.pending_dup_groups(kind=self.kind)
+        self._reload_list()
+        self.changed.emit()
+        if self.groups:
+            self.group_list.setCurrentRow(0)
+        else:
+            self._clear_cards()
+            self.group_title.setText("🎉 没有待处理的照片了。")
 
     def _clear_cards(self):
         while self.members_lay.count() > 1:
@@ -456,8 +491,12 @@ class DupGroupDialog(AppleDialog):
         self._clear_cards()
         photos = self.db.dup_group_photos(g["id"])
         keep = suggest_keep(self.db, photos)
-        self.group_title.setText(
-            f"{len(photos)} 张内容完全相同的照片（SHA-256 一致）· 请选择保留哪一张：")
+        if self.kind == "similar":
+            self.group_title.setText(
+                f"{len(photos)} 张看起来相似的照片（感知哈希相近）· 请确认保留哪一张：")
+        else:
+            self.group_title.setText(
+                f"{len(photos)} 张内容完全相同的照片（SHA-256 一致）· 请选择保留哪一张：")
         self._button_group = QButtonGroup(self)
         self._button_group.setExclusive(True)
         for p in photos:
@@ -491,9 +530,11 @@ class DupGroupDialog(AppleDialog):
         if keep_id is None:
             return
         n = g["count"] - 1
+        warn = ("请先确认这些照片确实重复。" if self.kind == "similar"
+                else "这些照片内容完全相同。")
         ret = QMessageBox.question(
-            self, "确认删除", f"将删除本组中除保留照片外的 {n} 张，"
-            f"原文件移入回收站文件夹（可恢复）。\n\n继续？",
+            self, "确认删除", f"{warn}\n将删除本组中除保留照片外的 {n} 张，"
+            f"原文件移入回收站（可恢复）。\n\n继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if ret != QMessageBox.StandardButton.Yes:
             return
@@ -502,14 +543,14 @@ class DupGroupDialog(AppleDialog):
         QMessageBox.information(self, "完成",
                                 f"已删除 {len(result['removed'])} 张（移入回收站）。"
                                 + (f"\n{failed} 张删除失败。" if failed else ""))
-        self.groups = self.db.pending_dup_groups()
+        self.groups = self.db.pending_dup_groups(kind=self.kind)
         self._reload_list()
         self.changed.emit()
         if self.groups:
             self.group_list.setCurrentRow(0)
         else:
             self._clear_cards()
-            self.group_title.setText("🎉 没有待处理的重复照片了。")
+            self.group_title.setText("🎉 没有待处理的照片了。")
 
     def _skip(self):
         row = self.group_list.currentRow()
@@ -685,6 +726,19 @@ class SettingsDialog(AppleDialog):
         for c in (self.chk_watch, self.chk_start, self.chk_clean):
             lay.addWidget(c)
 
+        # 相似照片灵敏度
+        sim_row = QHBoxLayout()
+        sim_row.addWidget(QLabel("相似照片判定灵敏度："))
+        self.sim_combo = AnimatedComboBox()
+        self.sim_combo.addItem("严格（只挑几乎一样）", 3)
+        self.sim_combo.addItem("标准（推荐）", 4)
+        self.sim_combo.addItem("宽松（连拍也算）", 6)
+        cur = int(settings.get("similar_threshold") or 4)
+        idx = self.sim_combo.findData(cur)
+        self.sim_combo.setCurrentIndex(idx if idx >= 0 else 1)
+        sim_row.addWidget(self.sim_combo, 1)
+        lay.addLayout(sim_row)
+
         note = QLabel("说明：监控会在文件夹内容变化后等待约 4 秒再扫描，避免拷贝大文件时反复触发。")
         note.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
         note.setWordWrap(True)
@@ -709,4 +763,5 @@ class SettingsDialog(AppleDialog):
         self.settings.set("auto_watch", self.chk_watch.isChecked())
         self.settings.set("auto_scan_on_start", self.chk_start.isChecked())
         self.settings.set("clean_missing", self.chk_clean.isChecked())
+        self.settings.set("similar_threshold", int(self.sim_combo.currentData() or 4))
         self.accept()

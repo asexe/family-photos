@@ -182,6 +182,19 @@ class Scanner:
         place = None
         if meta.get("lat") is not None and meta.get("lng") is not None:
             place = place_lookup(meta["lat"], meta["lng"])[0]
+        # 感知哈希（用刚生成的缩略图，快）——用于相似照片检测
+        phash_value = None
+        try:
+            from .phash import dhash, to_hex
+            thumb = thumbs.get("thumb")
+            if thumb:
+                from PIL import Image
+                with Image.open(thumb) as im:
+                    value = dhash(im)
+                if value:
+                    phash_value = to_hex(value)
+        except Exception:
+            phash_value = None
         row = {
             "folder_id": folder["id"],
             "user_id": folder["user_id"],
@@ -205,6 +218,7 @@ class Scanner:
             "preview_path": thumbs["preview"],
             "duration": meta.get("duration"),
             "place": place,
+            "phash": phash_value,
         }
         photo_id, is_new = self.db.upsert_photo(row)
         if not is_new:

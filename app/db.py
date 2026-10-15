@@ -77,6 +77,12 @@ CREATE TABLE IF NOT EXISTS trash (
     folder_id     INTEGER,
     deleted_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
+
+-- 被用户忽略的相似组（记住「这不是相似照片」，重算时不再提示）
+CREATE TABLE IF NOT EXISTS similar_ignored (
+    signature  TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
 """
 
 
@@ -113,6 +119,13 @@ class Database:
         if "place" not in cols:
             self._conn().execute("ALTER TABLE photos ADD COLUMN place TEXT")
             self._conn().execute("CREATE INDEX IF NOT EXISTS idx_photos_place ON photos(place)")
+        if "phash" not in cols:
+            self._conn().execute("ALTER TABLE photos ADD COLUMN phash TEXT")
+            self._conn().execute("CREATE INDEX IF NOT EXISTS idx_photos_phash ON photos(phash)")
+        gcols = {r[1] for r in self._conn().execute("PRAGMA table_info(duplicate_groups)")}
+        if "kind" not in gcols:
+            self._conn().execute(
+                "ALTER TABLE duplicate_groups ADD COLUMN kind TEXT NOT NULL DEFAULT 'exact'")
 
     def close(self):
         conn = getattr(self._local, "conn", None)
@@ -221,12 +234,13 @@ class Database:
                     INSERT INTO photos(folder_id, user_id, abs_path, filename, ext,
                         content_sha256, file_size, file_mtime, width, height, orientation,
                         taken_at, timezone_offset, lat, lng, altitude,
-                        camera_make, camera_model, thumb_path, preview_path, duration, place)
+                        camera_make, camera_model, thumb_path, preview_path, duration,
+                        place, phash)
                     VALUES (:folder_id, :user_id, :abs_path, :filename, :ext,
                         :content_sha256, :file_size, :file_mtime, :width, :height, :orientation,
                         :taken_at, :timezone_offset, :lat, :lng, :altitude,
                         :camera_make, :camera_model, :thumb_path, :preview_path, :duration,
-                        :place)""", p)
+                        :place, :phash)""", p)
                 return cur.lastrowid, True
             c.execute("""
                 UPDATE photos SET content_sha256=:content_sha256, file_size=:file_size,
@@ -234,7 +248,7 @@ class Database:
                     taken_at=:taken_at, timezone_offset=:timezone_offset, lat=:lat, lng=:lng,
                     altitude=:altitude, camera_make=:camera_make, camera_model=:camera_model,
                     thumb_path=:thumb_path, preview_path=:preview_path, duration=:duration,
-                    place=:place
+                    place=:place, phash=:phash
                 WHERE abs_path=:abs_path""", p)
             return old["id"], False
 
@@ -307,9 +321,9 @@ class Database:
             c.execute("UPDATE photos SET is_favorite=? WHERE id=?", (1 if fav else 0, photo_id))
 
     def query_photos(self, user_id=None, year=None, month=None, ext=None,
-                     dup_only=False, has_gps=None, no_time=False, fav_only=False,
-                     video_only=False, place=None, date_from=None, date_to=None,
-                     text=None, limit=None) -> list:
+                     dup_only=False, similar_only=False, has_gps=None, no_time=False,
+                     fav_only=False, video_only=False, place=None, date_from=None,
+                     date_to=None, text=None, limit=None) -> list:
         sql = """SELECT p.*, u.name AS user_name, u.color AS user_color
                  FROM photos p LEFT JOIN users u ON u.id = p.user_id WHERE 1=1"""
         args = []
@@ -331,7 +345,15 @@ class Database:
                 WHERE i.group_id IN (
                     SELECT g.id FROM duplicate_groups g
                     JOIN duplicate_items i2 ON i2.group_id = g.id
-                    WHERE g.status = 'pending'
+                    WHERE g.status = 'pending' AND g.kind = 'exact'
+                    GROUP BY g.id HAVING COUNT(i2.photo_id) >= 2))"""
+        if similar_only:
+            sql += """ AND p.id IN (
+                SELECT i.photo_id FROM duplicate_items i
+                WHERE i.group_id IN (
+                    SELECT g.id FROM duplicate_groups g
+                    JOIN duplicate_items i2 ON i2.group_id = g.id
+                    WHERE g.status = 'pending' AND g.kind = 'similar'
                     GROUP BY g.id HAVING COUNT(i2.photo_id) >= 2))"""
         if has_gps is True:
             sql += " AND p.lat IS NOT NULL"
@@ -363,21 +385,73 @@ class Database:
 
     def stats(self) -> dict:
         c = self._conn()
+
+        def group_count(kind: str) -> int:
+            return c.execute(
+                """SELECT COUNT(*) FROM (
+                       SELECT g.id FROM duplicate_groups g
+                       JOIN duplicate_items i ON i.group_id = g.id
+                       WHERE g.status = 'pending' AND g.kind = ?
+                       GROUP BY g.id HAVING COUNT(i.photo_id) >= 2)""", (kind,)).fetchone()[0]
+
         total = c.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
         no_gps = c.execute("SELECT COUNT(*) FROM photos WHERE lat IS NULL").fetchone()[0]
         no_time = c.execute("SELECT COUNT(*) FROM photos WHERE taken_at IS NULL").fetchone()[0]
-        pend = c.execute(
-            """SELECT COUNT(*) FROM (
-                   SELECT g.id FROM duplicate_groups g
-                   JOIN duplicate_items i ON i.group_id = g.id
-                   WHERE g.status = 'pending'
-                   GROUP BY g.id HAVING COUNT(i.photo_id) >= 2)""").fetchone()[0]
         per_user = [dict(r) for r in c.execute(
             """SELECT u.id, u.name, u.color, COUNT(p.id) AS n
                FROM users u LEFT JOIN photos p ON p.user_id=u.id
                GROUP BY u.id ORDER BY u.id""")]
         return {"total": total, "no_gps": no_gps, "no_time": no_time,
-                "pending_dups": pend, "per_user": per_user}
+                "pending_dups": group_count("exact"),
+                "pending_similar": group_count("similar"), "per_user": per_user}
+
+    # ---------- 感知哈希 ----------
+    def set_phash(self, photo_id: int, value: str):
+        with self._conn() as c:
+            c.execute("UPDATE photos SET phash=? WHERE id=?", (value, photo_id))
+
+    def photos_missing_phash(self, limit: int = 0) -> list:
+        sql = ("SELECT id, thumb_path, abs_path, duration FROM photos "
+               "WHERE phash IS NULL OR phash = ''")
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        return [dict(r) for r in self._conn().execute(sql)]
+
+    def photos_with_phash(self, exclude_exact_dups: bool = True) -> list:
+        """取出可参与相似聚类的照片 (id, phash)。默认排除已由精确去重处理的照片。"""
+        sql = ("SELECT p.id, p.phash FROM photos p WHERE p.phash IS NOT NULL "
+               "AND p.phash <> ''")
+        if exclude_exact_dups:
+            sql += """ AND p.id NOT IN (
+                        SELECT i.photo_id FROM duplicate_items i
+                        WHERE i.group_id IN (
+                            SELECT g.id FROM duplicate_groups g
+                            JOIN duplicate_items i2 ON i2.group_id = g.id
+                            WHERE g.kind = 'exact'
+                            GROUP BY g.id HAVING COUNT(i2.photo_id) >= 2))"""
+        return [dict(r) for r in self._conn().execute(sql)]
+
+    # ---------- 日历 ----------
+    def days_with_counts(self) -> list:
+        rows = self._conn().execute(
+            """SELECT substr(taken_at, 1, 10) AS day, COUNT(*) AS n
+               FROM photos WHERE taken_at IS NOT NULL AND taken_at <> ''
+               GROUP BY day ORDER BY day""").fetchall()
+        return [dict(r) for r in rows]
+
+    def first_photo_of_days(self, days: list) -> dict:
+        """{日期: 代表照片(含缩略图)}，用于日历格子里的封面。"""
+        if not days:
+            return {}
+        out = {}
+        for day in days:
+            row = self._conn().execute(
+                """SELECT p.id, p.thumb_path, p.filename FROM photos p
+                   WHERE substr(p.taken_at, 1, 10) = ?
+                   ORDER BY p.id LIMIT 1""", (day,)).fetchone()
+            if row:
+                out[day] = dict(row)
+        return out
 
     # ---------- 重复组 ----------
     def remove_missing_in_folder(self, folder_id: int, existing_paths: set) -> int:
@@ -415,20 +489,54 @@ class Database:
         with self._conn() as c:
             c.execute("DELETE FROM duplicate_items WHERE photo_id=?", (photo_id,))
 
-    def pending_dup_groups(self) -> list:
+    def pending_dup_groups(self, kind: str = "exact") -> list:
         rows = self._conn().execute("""
             SELECT g.id, g.hash_value, COUNT(i.photo_id) AS n,
                    GROUP_CONCAT(i.photo_id) AS photo_ids
             FROM duplicate_groups g
             JOIN duplicate_items i ON i.group_id = g.id
-            WHERE g.status='pending'
+            WHERE g.status='pending' AND g.kind=?
             GROUP BY g.id HAVING n >= 2
-            ORDER BY g.id DESC""").fetchall()
+            ORDER BY n DESC, g.id DESC""", (kind,)).fetchall()
         out = []
         for r in rows:
             out.append({"id": r["id"], "hash": r["hash_value"], "count": r["n"],
                         "photo_ids": [int(x) for x in r["photo_ids"].split(",")]})
         return out
+
+    # ---------- 相似组（感知哈希） ----------
+    def clear_similar_groups(self):
+        with self._conn() as c:
+            c.execute("""DELETE FROM duplicate_items WHERE group_id IN
+                         (SELECT id FROM duplicate_groups WHERE kind='similar')""")
+            c.execute("DELETE FROM duplicate_groups WHERE kind='similar'")
+
+    def add_similar_group(self, hash_value: str, photo_ids: list) -> int:
+        with self._conn() as c:
+            cur = c.execute(
+                "INSERT INTO duplicate_groups(hash_value, kind) VALUES (?, 'similar')",
+                (hash_value,))
+            gid = cur.lastrowid
+            for pid in photo_ids:
+                c.execute("INSERT OR IGNORE INTO duplicate_items(group_id, photo_id)"
+                          " VALUES (?, ?)", (gid, pid))
+            return gid
+
+    def add_similar_ignored(self, signature: str):
+        with self._conn() as c:
+            c.execute("INSERT OR IGNORE INTO similar_ignored(signature) VALUES (?)",
+                      (signature,))
+
+    def ignored_similar(self) -> set:
+        rows = self._conn().execute("SELECT signature FROM similar_ignored").fetchall()
+        return {r["signature"] for r in rows}
+
+    def similar_photo_ids(self) -> set:
+        rows = self._conn().execute("""
+            SELECT DISTINCT i.photo_id FROM duplicate_items i
+            JOIN duplicate_groups g ON g.id = i.group_id
+            WHERE g.kind='similar' AND g.status='pending'""").fetchall()
+        return {r["photo_id"] for r in rows}
 
     def dup_group_photos(self, group_id: int) -> list:
         rows = self._conn().execute("""

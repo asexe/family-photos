@@ -92,6 +92,32 @@ class ScanThread(QThread):
         self.finished_ok.emit(result)
 
 
+class SimilarThread(QThread):
+    """后台计算相似照片：补算感知哈希 + 重新聚类。"""
+    progress = Signal(str)
+    finished_ok = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, db, threshold: int = 4, parent=None):
+        super().__init__(parent)
+        self._db = db
+        self._threshold = threshold
+
+    def run(self):
+        try:
+            from ..similar import backfill_phash, rebuild_groups
+            missing = len(self._db.photos_missing_phash())
+            if missing:
+                self.progress.emit(f"正在计算感知哈希，剩余 {missing} 张…")
+                backfill_phash(self._db)
+            self.progress.emit("正在比对相似照片…")
+            stat = rebuild_groups(self._db, threshold=self._threshold)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(str(e))
+            return
+        self.finished_ok.emit(stat)
+
+
 class TitleBar(QFrame):
     """标题栏：左侧标题，右上角 [缩小(黄)][放大(绿)][关闭(红)]。
 
