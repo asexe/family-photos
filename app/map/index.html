@@ -57,7 +57,8 @@
 <script src="/vendor/leaflet.js"></script>
 <script src="/vendor/leaflet.markercluster.js"></script>
 <script>
-  var map = L.map('map', { zoomControl: false }).setView([34.5, 108.9], 4);
+  // maxZoom 必须显式指定：markercluster 在 getMaxZoom() 非有限值时会直接抛错
+  var map = L.map('map', { zoomControl: false, maxZoom: 19 }).setView([34.5, 108.9], 4);
   L.control.zoom({ position: 'bottomright' }).addTo(map);
 
   // ---------- 底图 ----------
@@ -150,11 +151,11 @@
   document.getElementById('btn-sat').onclick = function () { setLayer('sat'); };
   document.getElementById('btn-off').onclick = function () { setLayer('offline'); };
 
-  // 启动即探测一次底图连通性，避免先白屏再回退
+  // 先立即挂上默认底图（保证地图可用、maxZoom 有限），再异步探测连通性决定是否回退
+  setLayer('auto');
   probe('https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x=1&y=0&z=1', 4000)
     .then(function (ok) {
-      if (ok) { setLayer('auto'); }
-      else { setLayer('offline', '网络不可用，已切换到内置离线轮廓底图'); }
+      if (!ok) setLayer('offline', '网络不可用，已切换到内置离线轮廓底图');
     });
 
   // ---------- 照片聚合 ----------
