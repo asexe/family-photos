@@ -7,6 +7,7 @@ DEFAULTS = {
     "auto_scan_on_start": True,   # 启动时自动增量扫描一次
     "clean_missing": True,        # 扫描后清理磁盘上已不存在的记录
     "similar_threshold": 4,       # 相似照片判定阈值（汉明距离，越小越严格）
+    "show_calendar": False,       # 侧边栏是否显示「日历」入口（默认关闭）
 }
 
 

@@ -739,6 +739,10 @@ class SettingsDialog(AppleDialog):
         sim_row.addWidget(self.sim_combo, 1)
         lay.addLayout(sim_row)
 
+        self.chk_calendar = QCheckBox("在左侧显示「日历」视图")
+        self.chk_calendar.setChecked(bool(settings.get("show_calendar")))
+        lay.addWidget(self.chk_calendar)
+
         note = QLabel("说明：监控会在文件夹内容变化后等待约 4 秒再扫描，避免拷贝大文件时反复触发。")
         note.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
         note.setWordWrap(True)
@@ -764,4 +768,5 @@ class SettingsDialog(AppleDialog):
         self.settings.set("auto_scan_on_start", self.chk_start.isChecked())
         self.settings.set("clean_missing", self.chk_clean.isChecked())
         self.settings.set("similar_threshold", int(self.sim_combo.currentData() or 4))
+        self.settings.set("show_calendar", self.chk_calendar.isChecked())
         self.accept()

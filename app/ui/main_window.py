@@ -114,6 +114,7 @@ class MainWindow(FramelessWindow):
         self.btn_map = self._side_button("地图", "map")
         self.btn_all = self._side_button("全部照片", "images")
         self.btn_calendar = self._side_button("日历", "calendar-days")
+        self.btn_calendar.setVisible(bool(self.settings.get("show_calendar")))
         s.addWidget(self.btn_map)
         s.addWidget(self.btn_all)
         s.addWidget(self.btn_calendar)
@@ -269,10 +270,8 @@ class MainWindow(FramelessWindow):
         else:
             self.stack.addWidget(self.map_page)
 
-        # 日历页
-        self.calendar_page = CalendarPage(self.db)
-        self.calendar_page.day_selected.connect(self._on_day_selected)
-        self.stack.addWidget(self.calendar_page)
+        # 日历页（默认隐藏，按需惰性创建）
+        self.calendar_page = None
 
         r.addWidget(self.stack, 1)
         root.addWidget(right, 1)
@@ -414,13 +413,14 @@ class MainWindow(FramelessWindow):
     def refresh_view(self):
         st = self.db.stats()
 
-        # ---- 日历模式 ----
+        # ---- 日历模式（默认不显示入口，可在设置里开启） ----
         if self._mode == "calendar":
             self.title_label.setText("日历")
             self.subtitle_label.setText("点击有照片的日期，查看当天的照片与视频")
-            if not self.db.list_users():
-                self.stack.setCurrentWidget(self.empty_page)
-                return
+            if self.calendar_page is None:
+                self.calendar_page = CalendarPage(self.db)
+                self.calendar_page.day_selected.connect(self._on_day_selected)
+                self.stack.addWidget(self.calendar_page)
             self.calendar_page.reload()
             self.stack.setCurrentWidget(self.calendar_page)
             self._update_status()
@@ -748,7 +748,16 @@ class MainWindow(FramelessWindow):
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec():
             self._sync_watcher()
+            self._apply_calendar_visibility()
             self.scan_status_label.setText("设置已保存")
+
+    def _apply_calendar_visibility(self):
+        """根据设置显示/隐藏日历入口；关闭时若正停留在日历则回到全部照片。"""
+        show = bool(self.settings.get("show_calendar"))
+        self.btn_calendar.setVisible(show)
+        if not show and self._mode in ("calendar", "day"):
+            self._day = None
+            self._set_mode("all")
 
     def _open_trash(self):
         dlg = TrashDialog(self.db, self.trash_dir, self)
