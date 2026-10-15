@@ -10,14 +10,21 @@
 <style>
   html, body, #map { height: 100%; margin: 0; }
   body { background: #F5F5F7; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+  /* 底图未加载时不至于一片惨白 */
+  #map { background: #EDEFF2; }
   .layer-switch {
     position: absolute; top: 14px; right: 14px; z-index: 1000;
     background: rgba(255,255,255,.94); border-radius: 12px;
     box-shadow: 0 2px 10px rgba(0,0,0,.15); padding: 4px; }
   .layer-switch button {
-    border: none; background: transparent; padding: 7px 14px; border-radius: 9px;
+    border: none; background: transparent; padding: 7px 12px; border-radius: 9px;
     cursor: pointer; font-size: 12px; color: #1D1D1F; font-weight: 500; }
   .layer-switch button.active { background: #E8E8ED; font-weight: 700; }
+  .layer-hint {
+    position: absolute; top: 58px; right: 14px; z-index: 1000;
+    background: rgba(255,255,255,.94); border-radius: 10px; padding: 6px 10px;
+    font-size: 11px; color: #86868B; box-shadow: 0 2px 10px rgba(0,0,0,.12);
+    display: none; max-width: 190px; }
   .user-panel {
     position: absolute; bottom: 26px; left: 14px; z-index: 1000;
     background: rgba(255,255,255,.96); border-radius: 14px;
@@ -37,7 +44,9 @@
 <div class="layer-switch">
   <button id="btn-auto" class="active">地图</button>
   <button id="btn-sat">卫星</button>
+  <button id="btn-off">离线</button>
 </div>
+<div class="layer-hint" id="hint"></div>
 
 <div class="user-panel" id="userPanel" style="display:none">
   <div class="panel-title">家人（勾选在地图上显示）</div>
@@ -51,7 +60,7 @@
   var map = L.map('map', { zoomControl: false }).setView([34.5, 108.9], 4);
   L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-  // 底图：高德（国家和省份边界、中文标注）→ 失败自动切 OpenStreetMap
+  // ---------- 底图 ----------
   var baseAuto = L.tileLayer(
     'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
     { subdomains: ['1', '2', '3', '4'], maxZoom: 18, attribution: '高德地图' });
@@ -62,16 +71,93 @@
     'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
     { maxZoom: 19, attribution: '© OpenStreetMap' });
 
-  baseAuto.addTo(map);
-  baseAuto.on('tileerror', function () {
-    if (!map._osmSwitched) {
-      map._osmSwitched = true;
-      map.removeLayer(baseAuto);
-      baseOSM.addTo(map);
-      toggleLayers();
+  // 离线轮廓（内置国界与省界，无需联网）
+  var offlineGroup = L.layerGroup();
+  var offlineReady = false;
+  (function loadOffline() {
+    var world = { color: '#C2C6CE', weight: 0.8, fillColor: '#F4F6F9', fillOpacity: 1 };
+    var china = { color: '#9FA6B0', weight: 1, fillColor: '#FFFFFF', fillOpacity: 0.9 };
+    fetch('/basemap/world.json').then(function (r) { return r.json(); }).then(function (g) {
+      L.geoJSON(g, { style: world }).addTo(offlineGroup);
+      return fetch('/basemap/china.json');
+    }).then(function (r) { return r.json(); }).then(function (g) {
+      L.geoJSON(g, { style: china }).addTo(offlineGroup);
+      offlineReady = true;
+      if (currentLayer === 'offline') offlineGroup.addTo(map);
+    }).catch(function (e) { console.warn('离线底图加载失败', e); });
+  })();
+
+  var currentLayer = 'auto';
+  var tileErrors = { auto: 0, osm: 0 };
+  var TILE_ERR_LIMIT = 6;
+
+  function allLayers() { return [baseAuto, baseSat, baseOSM, offlineGroup]; }
+
+  function setLayer(name, hintText) {
+    allLayers().forEach(function (l) { if (map.hasLayer(l)) map.removeLayer(l); });
+    currentLayer = name;
+    if (name === 'auto') baseAuto.addTo(map);
+    else if (name === 'sat') baseSat.addTo(map);
+    else if (name === 'osm') baseOSM.addTo(map);
+    else if (name === 'offline') offlineGroup.addTo(map);
+    updateButtons();
+    showHint(hintText || '');
+  }
+
+  function updateButtons() {
+    // OSM 是高德的备用街道图，仍归在「地图」按钮下，保证始终有按钮处于选中态
+    document.getElementById('btn-auto').className =
+      (currentLayer === 'auto' || currentLayer === 'osm') ? 'active' : '';
+    document.getElementById('btn-sat').className = currentLayer === 'sat' ? 'active' : '';
+    document.getElementById('btn-off').className = currentLayer === 'offline' ? 'active' : '';
+  }
+
+  function showHint(text) {
+    var el = document.getElementById('hint');
+    el.textContent = text;
+    el.style.display = text ? 'block' : 'none';
+  }
+
+  function probe(url, timeoutMs) {
+    return new Promise(function (resolve) {
+      var img = new Image();
+      var done = false;
+      var timer = setTimeout(function () { if (!done) { done = true; resolve(false); } }, timeoutMs);
+      img.onload = function () { if (!done) { done = true; clearTimeout(timer); resolve(true); } };
+      img.onerror = function () { if (!done) { done = true; clearTimeout(timer); resolve(false); } };
+      img.src = url;
+    });
+  }
+
+  function failover() {
+    if (currentLayer === 'auto') {
+      setLayer('osm', '高德底图不可用，已切换 OpenStreetMap');
+    } else if (currentLayer === 'osm') {
+      setLayer('offline', '网络不可用，已切换到内置离线轮廓底图');
     }
+  }
+
+  baseAuto.on('tileerror', function () {
+    if (currentLayer !== 'auto') return;
+    if (++tileErrors.auto >= TILE_ERR_LIMIT) failover();
+  });
+  baseOSM.on('tileerror', function () {
+    if (currentLayer !== 'osm') return;
+    if (++tileErrors.osm >= TILE_ERR_LIMIT) failover();
   });
 
+  document.getElementById('btn-auto').onclick = function () { setLayer('auto'); };
+  document.getElementById('btn-sat').onclick = function () { setLayer('sat'); };
+  document.getElementById('btn-off').onclick = function () { setLayer('offline'); };
+
+  // 启动即探测一次底图连通性，避免先白屏再回退
+  probe('https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x=1&y=0&z=1', 4000)
+    .then(function (ok) {
+      if (ok) { setLayer('auto'); }
+      else { setLayer('offline', '网络不可用，已切换到内置离线轮廓底图'); }
+    });
+
+  // ---------- 照片聚合 ----------
   var markers = L.markerClusterGroup({
     maxClusterRadius: 64,
     spiderfyOnMaxZoom: true,
@@ -87,7 +173,6 @@
     return keys.length === 1 ? keys[0] : '#007AFF';
   }
 
-  // 聚合圆点：像苹果相册——照片缩略图 + 数量徽章，外圈为家人颜色
   function clusterIcon(cluster) {
     var n = cluster.getChildCount();
     var kids = cluster.getAllChildMarkers();
@@ -104,7 +189,6 @@
     return L.divIcon({ html: html, className: '', iconSize: [size, size] });
   }
 
-  // 单张：小缩略图，外圈家人颜色
   function singleIcon(p) {
     var size = 42;
     var html =
@@ -116,8 +200,7 @@
   }
 
   // ---------- 家人复选框筛选 ----------
-  var userGroups = {};   // user -> { color, markers: [L.marker], visible }
-  var userOrder = [];
+  var userGroups = {};
 
   function renderChecks() {
     var box = document.getElementById('userChecks');
@@ -175,7 +258,6 @@
   function loadPhotos() {
     fetch('/api/photos').then(function (r) { return r.json(); }).then(function (rows) {
       markers.clearLayers();
-      // 保留已有勾选状态
       var prev = {};
       Object.keys(userGroups).forEach(function (u) { prev[u] = userGroups[u].visible; });
       userGroups = {};
@@ -207,20 +289,6 @@
       }
     }).catch(function (e) { console.error('loadPhotos failed', e); });
   }
-
-  function toggleLayers() {
-    document.getElementById('btn-auto').className = map.hasLayer(baseAuto) ? 'active' : '';
-    document.getElementById('btn-sat').className = map.hasLayer(baseSat) ? 'active' : '';
-  }
-
-  document.getElementById('btn-auto').onclick = function () {
-    map.removeLayer(baseSat); map.removeLayer(baseOSM);
-    baseAuto.addTo(map); toggleLayers();
-  };
-  document.getElementById('btn-sat').onclick = function () {
-    map.removeLayer(baseAuto); map.removeLayer(baseOSM);
-    baseSat.addTo(map); toggleLayers();
-  };
 
   loadPhotos();
   window.loadPhotos = loadPhotos;

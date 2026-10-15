@@ -13,6 +13,7 @@ MAP_DIR = Path(__file__).resolve().parent / "map"
 _MIME = {".html": "text/html; charset=utf-8",
          ".js": "application/javascript",
          ".css": "text/css",
+         ".json": "application/json; charset=utf-8",
          ".png": "image/png",
          ".jpg": "image/jpeg"}
 
