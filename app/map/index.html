@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>地图</title>
+<link rel="stylesheet" href="/vendor/leaflet.css">
+<link rel="stylesheet" href="/vendor/MarkerCluster.css">
+<link rel="stylesheet" href="/vendor/MarkerCluster.Default.css">
+<style>
+  html, body, #map { height: 100%; margin: 0; }
+  body { background: #F5F5F7; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+  .layer-switch {
+    position: absolute; top: 14px; right: 14px; z-index: 1000;
+    background: rgba(255,255,255,.94); border-radius: 12px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.15); padding: 4px; }
+  .layer-switch button {
+    border: none; background: transparent; padding: 7px 14px; border-radius: 9px;
+    cursor: pointer; font-size: 12px; color: #1D1D1F; font-weight: 500; }
+  .layer-switch button.active { background: #E8E8ED; font-weight: 700; }
+  .user-panel {
+    position: absolute; bottom: 26px; left: 14px; z-index: 1000;
+    background: rgba(255,255,255,.96); border-radius: 14px;
+    box-shadow: 0 3px 14px rgba(0,0,0,.16); padding: 12px 14px;
+    font-size: 12px; color: #1D1D1F; min-width: 130px; }
+  .user-panel .panel-title { font-size: 11px; font-weight: 700; color: #86868B;
+                             margin-bottom: 6px; }
+  .ucheck { display: block; padding: 3px 0; cursor: pointer; }
+  .ucheck input { accent-color: #007AFF; margin: 0 6px 0 0; vertical-align: middle; }
+  .ucheck .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+                 margin-right: 6px; vertical-align: middle; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="layer-switch">
+  <button id="btn-auto" class="active">地图</button>
+  <button id="btn-sat">卫星</button>
+</div>
+
+<div class="user-panel" id="userPanel" style="display:none">
+  <div class="panel-title">家人（勾选在地图上显示）</div>
+  <label class="ucheck"><input type="checkbox" id="chk_all" checked><span class="dot" style="background:#007AFF"></span>全部</label>
+  <div id="userChecks"></div>
+</div>
+
+<script src="/vendor/leaflet.js"></script>
+<script src="/vendor/leaflet.markercluster.js"></script>
+<script>
+  var map = L.map('map', { zoomControl: false }).setView([34.5, 108.9], 4);
+  L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+  // 底图：高德（国家和省份边界、中文标注）→ 失败自动切 OpenStreetMap
+  var baseAuto = L.tileLayer(
+    'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
+    { subdomains: ['1', '2', '3', '4'], maxZoom: 18, attribution: '高德地图' });
+  var baseSat = L.tileLayer(
+    'https://webst0{s}.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+    { subdomains: ['1', '2', '3', '4'], maxZoom: 18, attribution: '高德卫星' });
+  var baseOSM = L.tileLayer(
+    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom: 19, attribution: '© OpenStreetMap' });
+
+  baseAuto.addTo(map);
+  baseAuto.on('tileerror', function () {
+    if (!map._osmSwitched) {
+      map._osmSwitched = true;
+      map.removeLayer(baseAuto);
+      baseOSM.addTo(map);
+      toggleLayers();
+    }
+  });
+
+  var markers = L.markerClusterGroup({
+    maxClusterRadius: 64,
+    spiderfyOnMaxZoom: true,
+    showCoverageOnHover: false,
+    zoomToBoundsOnClick: true,
+    iconCreateFunction: clusterIcon
+  });
+
+  function ringColor(kids) {
+    var colors = {};
+    kids.forEach(function (m) { if (m.options.color) colors[m.options.color] = 1; });
+    var keys = Object.keys(colors);
+    return keys.length === 1 ? keys[0] : '#007AFF';
+  }
+
+  // 聚合圆点：像苹果相册——照片缩略图 + 数量徽章，外圈为家人颜色
+  function clusterIcon(cluster) {
+    var n = cluster.getChildCount();
+    var kids = cluster.getAllChildMarkers();
+    var color = ringColor(kids);
+    var thumb = (kids[0] && kids[0].options.thumb) || '';
+    var size = n > 999 ? 66 : (n > 99 ? 58 : 50);
+    var html =
+      '<div style="width:' + size + 'px;height:' + size + 'px;border:3px solid ' + color +
+      ';border-radius:15px;box-shadow:0 3px 12px rgba(0,0,0,.30);overflow:hidden;position:relative;background:#fff">' +
+      '<img src="' + thumb + '" style="width:100%;height:100%;object-fit:cover">' +
+      '<div style="position:absolute;right:-9px;bottom:-9px;background:#007AFF;color:#fff;border-radius:12px;' +
+      'font-size:12px;font-weight:700;padding:2px 9px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.3)">' +
+      n + '</div></div>';
+    return L.divIcon({ html: html, className: '', iconSize: [size, size] });
+  }
+
+  // 单张：小缩略图，外圈家人颜色
+  function singleIcon(p) {
+    var size = 42;
+    var html =
+      '<div style="width:' + size + 'px;height:' + size + 'px;border:2.5px solid ' + p.color +
+      ';border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.32);overflow:hidden;background:#fff">' +
+      '<img src="' + p.thumb + '" style="width:100%;height:100%;object-fit:cover"></div>';
+    return L.divIcon({ html: html, className: '', iconSize: [size, size],
+                       iconAnchor: [size / 2, size / 2] });
+  }
+
+  // ---------- 家人复选框筛选 ----------
+  var userGroups = {};   // user -> { color, markers: [L.marker], visible }
+  var userOrder = [];
+
+  function renderChecks() {
+    var box = document.getElementById('userChecks');
+    box.innerHTML = '';
+    Object.keys(userGroups).forEach(function (u) {
+      var g = userGroups[u];
+      var label = document.createElement('label');
+      label.className = 'ucheck';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = g.visible;
+      cb.dataset.user = u;
+      cb.onchange = function () {
+        setUserVisible(u, cb.checked);
+        updateAllCheck();
+      };
+      label.appendChild(cb);
+      var dot = document.createElement('span');
+      dot.className = 'dot';
+      dot.style.background = g.color;
+      label.appendChild(dot);
+      label.appendChild(document.createTextNode(u));
+      box.appendChild(label);
+    });
+    updateAllCheck();
+  }
+
+  function setUserVisible(user, visible) {
+    var g = userGroups[user];
+    if (!g) return;
+    g.visible = visible;
+    if (visible) markers.addLayers(g.markers);
+    else markers.removeLayers(g.markers);
+  }
+
+  function updateAllCheck() {
+    var inputs = document.querySelectorAll('#userChecks input');
+    var allOn = true;
+    for (var i = 0; i < inputs.length; i++) {
+      if (!inputs[i].checked) { allOn = false; break; }
+    }
+    document.getElementById('chk_all').checked = allOn;
+  }
+
+  document.getElementById('chk_all').onchange = function () {
+    var on = this.checked;
+    var inputs = document.querySelectorAll('#userChecks input');
+    for (var i = 0; i < inputs.length; i++) {
+      inputs[i].checked = on;
+      setUserVisible(inputs[i].dataset.user, on);
+    }
+  };
+
+  // ---------- 数据加载 ----------
+  function loadPhotos() {
+    fetch('/api/photos').then(function (r) { return r.json(); }).then(function (rows) {
+      markers.clearLayers();
+      // 保留已有勾选状态
+      var prev = {};
+      Object.keys(userGroups).forEach(function (u) { prev[u] = userGroups[u].visible; });
+      userGroups = {};
+      var bounds = [];
+      rows.forEach(function (p) {
+        var m = L.marker([p.lat, p.lng], {
+          icon: singleIcon(p), thumb: p.thumb, color: p.color, pid: p.id,
+          title: (p.user || '未知') + ' · ' + (p.taken ? p.taken.slice(0, 10) : '')
+        });
+        m.on('click', function () { window.location.href = 'photo://open/' + p.id; });
+        var key = p.user || '未知';
+        if (!userGroups[key]) {
+          userGroups[key] = { color: p.color || '#007AFF',
+                              markers: [], visible: prev[key] !== undefined ? prev[key] : true };
+        }
+        userGroups[key].markers.push(m);
+        bounds.push([p.lat, p.lng]);
+      });
+      Object.keys(userGroups).forEach(function (u) {
+        if (userGroups[u].visible) markers.addLayers(userGroups[u].markers);
+      });
+      map.addLayer(markers);
+      renderChecks();
+      document.getElementById('userPanel').style.display =
+        Object.keys(userGroups).length ? 'block' : 'none';
+      if (bounds.length) {
+        map.fitBounds(L.latLngBounds(bounds).pad(0.15), { maxZoom: 10 });
+      }
+    }).catch(function (e) { console.error('loadPhotos failed', e); });
+  }
+
+  function toggleLayers() {
+    document.getElementById('btn-auto').className = map.hasLayer(baseAuto) ? 'active' : '';
+    document.getElementById('btn-sat').className = map.hasLayer(baseSat) ? 'active' : '';
+  }
+
+  document.getElementById('btn-auto').onclick = function () {
+    map.removeLayer(baseSat); map.removeLayer(baseOSM);
+    baseAuto.addTo(map); toggleLayers();
+  };
+  document.getElementById('btn-sat').onclick = function () {
+    map.removeLayer(baseAuto); map.removeLayer(baseOSM);
+    baseSat.addTo(map); toggleLayers();
+  };
+
+  loadPhotos();
+  window.loadPhotos = loadPhotos;
+</script>
+</body>
+</html>

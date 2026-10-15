@@ -1,0 +1,30 @@
+# ---- 运行数据（个人照片索引与缩略图，绝不入库）----
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# ---- 开发期本地脚本（含个人路径，不发布）----
+debug_shots.py
+diag_*.py
+e2e_test.py
+smoke_test.py
+ui_smoke.py
+setup_and_scan.py
+rescan_videos.py
+cleanup_missing.py
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

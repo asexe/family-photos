@@ -1,0 +1,4 @@
+# 运行依赖（均为跨平台 wheel，Windows 下可直接安装）
+pyside6>=6.6
+pillow-heif>=0.16
+opencv-python-headless>=4.8
