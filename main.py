@@ -10,7 +10,14 @@ from app.thumbs import ensure_pil_plugins
 from app.ui.main_window import MainWindow
 from app.ui.style import FONT_FAMILIES, apply_constants, QSS
 
-APP_DIR = Path(__file__).resolve().parent.parent
+def _base_dir() -> Path:
+    """打包成 exe 后，数据目录放在 exe 旁边；开发时即项目根目录。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+APP_DIR = _base_dir()
 DATA_DIR = APP_DIR / "data"
 
 
@@ -31,6 +38,14 @@ def main():
 
     db = Database(DATA_DIR / "photos.db")
     db.init()
+    # 升级兼容：为已有 GPS 但尚无地点的记录回填「省·市」（首次运行稍慢，之后跳过）
+    try:
+        from app.places import backfill as backfill_places
+        filled = backfill_places(db)
+        if filled:
+            print(f"已回填 {filled} 条地点信息")
+    except Exception:
+        pass
     win = MainWindow(db, DATA_DIR)
     win.show()
     sys.exit(app.exec())

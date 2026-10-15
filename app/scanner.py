@@ -14,6 +14,7 @@ from pathlib import Path
 from .db import Database
 from .exif_reader import extract_metadata
 from .hashing import sha256_file
+from .places import lookup as place_lookup
 from .thumbs import extract_video_meta, generate_thumbs, generate_video_thumb
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".gif",
@@ -78,8 +79,12 @@ class Scanner:
     def cancel(self):
         self._cancel.set()
 
-    def scan_folder(self, folder_id: int, on_progress=None) -> dict:
-        """扫描一个数据源。on_progress(done, total, new, dup) 在每张处理完后回调。"""
+    def scan_folder(self, folder_id: int, on_progress=None,
+                    clean_missing: bool = False) -> dict:
+        """扫描一个数据源。on_progress(done, total, new, dup) 在每张处理完后回调。
+
+        clean_missing=True 时，扫描结束后删除磁盘上已不存在的记录。
+        """
         self._cancel.clear()
         folder = self.db.get_folder(folder_id)
         if not folder:
@@ -135,8 +140,15 @@ class Scanner:
                         done += 1
                         if on_progress:
                             on_progress(done, total, new_count, dup_count)
+            removed = 0
+            if clean_missing and not self._cancel.is_set():
+                existing = {str(p) for p in files}
+                removed = self.db.remove_missing_in_folder(folder_id, existing)
+                if removed:
+                    self.db.cleanup_empty_dup_groups()
             self.db.set_folder_status(folder_id, "done", last_scan=True)
-            return {"total": total, "new": new_count, "duplicates": dup_count}
+            return {"total": total, "new": new_count, "duplicates": dup_count,
+                    "removed": removed}
         finally:
             if not self._cancel.is_set():
                 self.db.set_folder_status(folder_id, "done", last_scan=True)
@@ -166,6 +178,10 @@ class Scanner:
         else:
             meta = extract_metadata(p)
             thumbs = generate_thumbs(p, sha, self.thumb_dir)
+        # 离线地点反查（GPS → 省·市）
+        place = None
+        if meta.get("lat") is not None and meta.get("lng") is not None:
+            place = place_lookup(meta["lat"], meta["lng"])[0]
         row = {
             "folder_id": folder["id"],
             "user_id": folder["user_id"],
@@ -188,6 +204,7 @@ class Scanner:
             "thumb_path": thumbs["thumb"],
             "preview_path": thumbs["preview"],
             "duration": meta.get("duration"),
+            "place": place,
         }
         photo_id, is_new = self.db.upsert_photo(row)
         if not is_new:

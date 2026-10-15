@@ -1,14 +1,16 @@
-"""对话框：用户管理、数据来源、重复照片处理。"""
+"""对话框：用户管理、数据来源、重复照片、回收站、设置。"""
+from pathlib import Path
+
 from PySide6.QtCore import Qt, QSize, Signal
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QButtonGroup, QComboBox, QFileDialog,
+from PySide6.QtGui import QColor, QIcon, QPixmap
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QFileDialog,
                                QFrame, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem,
                                QMessageBox, QProgressBar, QPushButton,
                                QRadioButton, QScrollArea, QVBoxLayout, QWidget)
 
 from ..db import Database
-from ..dedup import resolve_group, suggest_keep
+from ..dedup import purge, purge_all, resolve_group, restore, suggest_keep
 from ..scanner import Scanner
 from .icons import icon as make_icon
 from .models import load_thumb_pixmap
@@ -520,3 +522,191 @@ class DupGroupDialog(AppleDialog):
             else:
                 self._clear_cards()
                 self.group_title.setText("🎉 没有待处理的重复照片了。")
+
+
+# ======================================================================
+# 回收站
+# ======================================================================
+class TrashDialog(AppleDialog):
+    """回收站：预览、恢复、彻底删除、清空。"""
+
+    changed = Signal()
+
+    def __init__(self, db: Database, trash_dir, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.trash_dir = Path(trash_dir)
+        self.setWindowTitle("回收站")
+        self.setModal(True)
+        self.resize(820, 560)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 22, 24, 20)
+        lay.setSpacing(12)
+
+        title = QLabel("回收站")
+        title.setObjectName("dialogTitle")
+        lay.addWidget(title)
+        self.hint = QLabel("删除的照片与视频都暂存在这里，可恢复到原位置。")
+        self.hint.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        self.hint.setWordWrap(True)
+        lay.addWidget(self.hint)
+
+        self.listw = QListWidget()
+        self.listw.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self.listw.setIconSize(QSize(72, 56))
+        lay.addWidget(self.listw, 1)
+
+        btns = QHBoxLayout()
+        self.btn_restore = QPushButton("恢复选中")
+        self.btn_restore.setObjectName("primary")
+        self.btn_restore.setIcon(make_icon("refresh", "#FFFFFF", 14))
+        self.btn_restore.setIconSize(QSize(14, 14))
+        self.btn_restore.clicked.connect(self._restore)
+        self.btn_purge = QPushButton("彻底删除")
+        self.btn_purge.setObjectName("ghost")
+        self.btn_purge.clicked.connect(self._purge)
+        self.btn_clear = QPushButton("清空回收站")
+        self.btn_clear.setObjectName("ghost")
+        self.btn_clear.clicked.connect(self._purge_all)
+        btns.addWidget(self.btn_restore)
+        btns.addWidget(self.btn_purge)
+        btns.addWidget(self.btn_clear)
+        btns.addStretch(1)
+        btn_close = QPushButton("完成")
+        btn_close.setObjectName("primary")
+        btn_close.setIcon(make_icon("check", "#FFFFFF", 14))
+        btn_close.setIconSize(QSize(14, 14))
+        btn_close.clicked.connect(self.accept)
+        btns.addWidget(btn_close)
+        lay.addLayout(btns)
+        self._reload()
+
+    def _reload(self):
+        self.listw.clear()
+        rows = self.db.list_trash()
+        for r in rows:
+            size_kb = (r.get("file_size") or 0) / 1024
+            size = f"{size_kb / 1024:.1f} MB" if size_kb > 1024 else f"{size_kb:.0f} KB"
+            text = (f"{r['filename']}\n删除时间 {r.get('deleted_at', '')} · {size}\n"
+                    f"原位置 {r['original_path']}")
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, r)
+            thumb = r.get("thumb_path")
+            if thumb and Path(thumb).exists():
+                pm = QPixmap(thumb)
+                if not pm.isNull():
+                    item.setIcon(QIcon(pm.scaled(72, 56, Qt.AspectRatioMode.KeepAspectRatio,
+                                                 Qt.TransformationMode.SmoothTransformation)))
+            self.listw.addItem(item)
+        self.hint.setText(f"删除的照片与视频都暂存在这里，可恢复到原位置。当前 {len(rows)} 项。")
+
+    def _selected(self):
+        return [i.data(Qt.ItemDataRole.UserRole) for i in self.listw.selectedItems()]
+
+    def _restore(self):
+        rows = self._selected()
+        if not rows:
+            QMessageBox.information(self, "提示", "请先选择要恢复的项目。")
+            return
+        ok = 0
+        msgs = []
+        for r in rows:
+            done, msg = restore(self.db, r["id"])
+            if done:
+                ok += 1
+            else:
+                msgs.append(msg)
+        self._reload()
+        self.changed.emit()
+        QMessageBox.information(self, "恢复完成",
+                               f"已恢复 {ok} 项。" + ("\n" + "\n".join(msgs[:5]) if msgs else ""))
+
+    def _purge(self):
+        rows = self._selected()
+        if not rows:
+            return
+        ret = QMessageBox.question(
+            self, "彻底删除", f"彻底删除选中的 {len(rows)} 项？此操作不可恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        for r in rows:
+            purge(self.db, r["id"])
+        self._reload()
+        self.changed.emit()
+
+    def _purge_all(self):
+        rows = self.db.list_trash()
+        if not rows:
+            return
+        ret = QMessageBox.question(
+            self, "清空回收站", f"清空回收站中的 {len(rows)} 项？此操作不可恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        n = purge_all(self.db)
+        self._reload()
+        self.changed.emit()
+        QMessageBox.information(self, "完成", f"已彻底删除 {n} 个文件。")
+
+
+# ======================================================================
+# 设置
+# ======================================================================
+class SettingsDialog(AppleDialog):
+    """应用设置：自动监控、启动扫描、失效清理。"""
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.setWindowTitle("设置")
+        self.setModal(True)
+        self.resize(460, 300)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 22, 24, 20)
+        lay.setSpacing(12)
+
+        title = QLabel("设置")
+        title.setObjectName("dialogTitle")
+        lay.addWidget(title)
+        hint = QLabel("自动监控会在你往照片文件夹里放入新照片/视频后，自动完成扫描入库。")
+        hint.setStyleSheet(f"color: {TEXT_SECONDARY};")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        self.chk_watch = QCheckBox("自动监控照片文件夹（发现新文件即自动扫描）")
+        self.chk_watch.setChecked(bool(settings.get("auto_watch")))
+        self.chk_start = QCheckBox("启动软件时自动扫描一次")
+        self.chk_start.setChecked(bool(settings.get("auto_scan_on_start")))
+        self.chk_clean = QCheckBox("扫描后清理已删除文件的索引记录")
+        self.chk_clean.setChecked(bool(settings.get("clean_missing")))
+        for c in (self.chk_watch, self.chk_start, self.chk_clean):
+            lay.addWidget(c)
+
+        note = QLabel("说明：监控会在文件夹内容变化后等待约 4 秒再扫描，避免拷贝大文件时反复触发。")
+        note.setStyleSheet(f"color: {TEXT_SECONDARY}; font-size: 11px;")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        lay.addStretch(1)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.setObjectName("ghost")
+        btn_cancel.clicked.connect(self.reject)
+        btn_ok = QPushButton("保存")
+        btn_ok.setObjectName("primary")
+        btn_ok.setIcon(make_icon("check", "#FFFFFF", 14))
+        btn_ok.setIconSize(QSize(14, 14))
+        btn_ok.clicked.connect(self._save)
+        btns.addWidget(btn_cancel)
+        btns.addWidget(btn_ok)
+        lay.addLayout(btns)
+
+    def _save(self):
+        self.settings.set("auto_watch", self.chk_watch.isChecked())
+        self.settings.set("auto_scan_on_start", self.chk_start.isChecked())
+        self.settings.set("clean_missing", self.chk_clean.isChecked())
+        self.accept()

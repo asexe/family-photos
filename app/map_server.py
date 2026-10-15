@@ -71,6 +71,7 @@ class MapServer:
                     "user": r.get("user_name") or "",
                     "color": r.get("user_color") or "#007AFF",
                     "taken": r.get("taken_at") or "",
+                    "place": r.get("place") or "",
                 })
             body = json.dumps(out, ensure_ascii=False).encode("utf-8")
             self._send_bytes(h, body, "application/json; charset=utf-8")

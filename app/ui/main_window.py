@@ -21,7 +21,10 @@ from ..db import Database
 from ..dedup import single_delete
 from ..map_server import MapServer
 from ..scanner import Scanner
-from .dialogs import DupGroupDialog, FoldersDialog, UsersDialog
+from ..settings import Settings
+from ..watcher import FolderWatcher
+from .dialogs import (DupGroupDialog, FoldersDialog, SettingsDialog,
+                      TrashDialog, UsersDialog)
 from .icons import icon as make_icon
 from .style import TEXT_SECONDARY, user_color
 from .timeline_wall import TimelineWall
@@ -40,6 +43,10 @@ class MainWindow(FramelessWindow):
         self.scanner = Scanner(db, self.thumb_dir)
         self._current_photos = []
         self._scan_thread = None
+        self._pending_scan = []
+        self._auto_scan = False
+        self.watcher = None
+        self.settings = Settings(self.data_dir / "settings.json")
         self._mode = "map"          # map | all | dups | user
         self._mode_arg = None       # user id
         self._mode_sub = None       # all | fav | gps | nogps（user 模式下）
@@ -59,6 +66,10 @@ class MainWindow(FramelessWindow):
         self._watchdog.setInterval(3000)
         self._watchdog.timeout.connect(self._watchdog_tick)
         self._watchdog.start()
+
+        # 自动监控数据源文件夹 + 启动自动扫描
+        self._setup_watcher()
+        QTimer.singleShot(1500, self._startup_scan)
 
     def _watchdog_tick(self):
         st = self.db.stats()
@@ -130,12 +141,18 @@ class MainWindow(FramelessWindow):
         self.btn_scan = self._side_ghost("重新扫描", "refresh")
         self.btn_folders = self._side_ghost("数据来源…", "folder")
         self.btn_users = self._side_ghost("用户管理…", "user")
+        self.btn_trash = self._side_ghost("回收站…", "trash-can")
+        self.btn_settings = self._side_ghost("设置…", "star")
         s.addWidget(self.btn_scan)
         s.addWidget(self.btn_folders)
         s.addWidget(self.btn_users)
+        s.addWidget(self.btn_trash)
+        s.addWidget(self.btn_settings)
         self.btn_scan.clicked.connect(self._scan_all)
         self.btn_folders.clicked.connect(self._open_folders)
         self.btn_users.clicked.connect(self._open_users)
+        self.btn_trash.clicked.connect(self._open_trash)
+        self.btn_settings.clicked.connect(self._open_settings)
         root.addWidget(sidebar)
 
         # ---------- 右侧主区域 ----------
@@ -180,7 +197,12 @@ class MainWindow(FramelessWindow):
         pal.setColor(QPalette.ColorRole.Base, QColor("#FFFFFF"))
         pal.setColor(QPalette.ColorRole.Text, QColor("#1D1D1F"))
         self.search_edit.setPalette(pal)
-        for w in (self.time_combo, self.fmt_combo, self.search_edit):
+        # 地点筛选（离线反查出的省·市）
+        self.place_combo = AnimatedComboBox()
+        self.place_combo.addItem("全部地点", None)
+        self.place_combo.setFixedWidth(180)
+        self.place_combo.currentIndexChanged.connect(lambda _: self.refresh_view())
+        for w in (self.time_combo, self.place_combo, self.fmt_combo, self.search_edit):
             bar.addWidget(w)
         self.btn_dup_review = QPushButton("处理重复照片…")
         self.btn_dup_review.setObjectName("primary")
@@ -282,6 +304,7 @@ class MainWindow(FramelessWindow):
         """刷新侧边栏计数与当前视图。"""
         st = self.db.stats()
         self.btn_all.setText(f"全部照片　{st['total']}")
+        self._reload_places()
 
         # 家人树（保持展开状态；结构未变时仅更新文字）
         expanded = set()
@@ -338,6 +361,22 @@ class MainWindow(FramelessWindow):
             self.empty_label.setText("还没有照片\n\n请先在左下角「数据来源」中添加照片文件夹")
             self.empty_btn.setVisible(False)
         self.refresh_view()
+
+    def _reload_places(self):
+        """刷新地点下拉（只列出库里实际存在的地点，带数量）。"""
+        try:
+            current = self.place_combo.currentData()
+            places = self.db.places_list()
+            self.place_combo.blockSignals(True)
+            self.place_combo.clear()
+            self.place_combo.addItem("全部地点", None)
+            for p in places[:80]:
+                self.place_combo.addItem(f"{p['place']}（{p['n']}）", p["place"])
+            idx = self.place_combo.findData(current)
+            self.place_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.place_combo.blockSignals(False)
+        except Exception:
+            pass
 
     def _on_tree_item_clicked(self, item, _col):
         kind = item.data(0, Qt.ItemDataRole.UserRole + 2)
@@ -421,6 +460,9 @@ class MainWindow(FramelessWindow):
         fmt = self.fmt_combo.currentData()
         if fmt:
             kwargs["ext"] = fmt
+        place = self.place_combo.currentData()
+        if place:
+            kwargs["place"] = place
         text = self.search_edit.text().strip()
         if text:
             kwargs["text"] = text
@@ -571,15 +613,28 @@ class MainWindow(FramelessWindow):
         if not folder_ids:
             self._open_folders()
             return
-        if self._scan_thread is not None and self._scan_thread.isRunning():
+        self._run_scan(folder_ids)
+
+    def _run_scan(self, folder_ids, auto: bool = False):
+        """启动扫描线程。auto=True 表示由文件夹监控自动触发。"""
+        folder_ids = [fid for fid in folder_ids if fid]
+        if not folder_ids:
             return
-        self._scan_thread = ScanThread(self.scanner, folder_ids, self)
+        if self._scan_thread is not None and self._scan_thread.isRunning():
+            # 正在扫描：记录待扫，等本轮结束后继续
+            self._pending_scan = sorted(set(self._pending_scan) | set(folder_ids))
+            return
+        self._auto_scan = auto
+        self._scan_thread = ScanThread(self.scanner, folder_ids, self,
+                                       clean_missing=self.settings.get("clean_missing"))
         self._scan_thread.progress.connect(self._on_scan_progress)
         self._scan_thread.finished_ok.connect(self._on_scan_done)
         self._scan_thread.failed.connect(self._on_scan_failed)
         self.progress.setVisible(True)
         self.progress.setValue(0)
         self.btn_scan.setEnabled(False)
+        if auto:
+            self.scan_status_label.setText("检测到新文件，正在自动扫描…")
         self._scan_thread.start()
 
     def _on_scan_progress(self, done, total, new, dup):
@@ -591,14 +646,67 @@ class MainWindow(FramelessWindow):
     def _on_scan_done(self, result):
         self.progress.setVisible(False)
         self.btn_scan.setEnabled(True)
-        self.scan_status_label.setText(
-            f"扫描完成：新增 {result.get('new', 0)}，重复 {result.get('duplicates', 0)}")
+        removed = result.get("removed", 0)
+        text = f"扫描完成：新增 {result.get('new', 0)}，重复 {result.get('duplicates', 0)}"
+        if removed:
+            text += f"，清理失效 {removed}"
+        self.scan_status_label.setText(text)
+        # 扫描后刷新监听目录（可能新增了子目录）
+        if self.watcher is not None:
+            self.watcher.refresh_dirs()
         self.refresh_all()
+        if self._pending_scan:
+            pending = self._pending_scan
+            self._pending_scan = []
+            QTimer.singleShot(500, lambda: self._run_scan(pending, auto=True))
 
     def _on_scan_failed(self, msg):
         self.progress.setVisible(False)
         self.btn_scan.setEnabled(True)
         self.scan_status_label.setText("扫描失败：" + msg)
+
+    # ==================================================================
+    # 自动监控
+    # ==================================================================
+    def _setup_watcher(self):
+        self.watcher = FolderWatcher(self)
+        self.watcher.changed.connect(self._on_folders_changed)
+        self._sync_watcher()
+
+    def _sync_watcher(self):
+        if self.watcher is None:
+            return
+        self.watcher.enabled = bool(self.settings.get("auto_watch"))
+        self.watcher.set_folders([(f["id"], f["path"]) for f in self.db.list_folders()])
+
+    def _on_folders_changed(self, folder_ids):
+        if not self.settings.get("auto_watch"):
+            return
+        self._run_scan(folder_ids, auto=True)
+
+    def _startup_scan(self):
+        if not self.settings.get("auto_scan_on_start"):
+            return
+        folder_ids = [f["id"] for f in self.db.list_folders()]
+        if folder_ids:
+            self._run_scan(folder_ids, auto=True)
+
+    def _open_settings(self):
+        dlg = SettingsDialog(self.settings, self)
+        if dlg.exec():
+            self._sync_watcher()
+            self.scan_status_label.setText("设置已保存")
+
+    def _open_trash(self):
+        dlg = TrashDialog(self.db, self.trash_dir, self)
+        restored = {"n": 0}
+        dlg.changed.connect(lambda: restored.__setitem__("n", restored["n"] + 1))
+        dlg.exec()
+        self.refresh_all()
+        # 有恢复操作时，重扫一次把文件重新纳入索引
+        if restored["n"]:
+            folder_ids = [f["id"] for f in self.db.list_folders()]
+            self._run_scan(folder_ids, auto=True)
 
     # ==================================================================
     # 对话框
@@ -619,6 +727,7 @@ class MainWindow(FramelessWindow):
         dlg = FoldersDialog(self.db, self.scanner, self)
         dlg.changed.connect(self.refresh_all)
         dlg.exec()
+        self._sync_watcher()          # 数据源变化 → 重新注册监控
         self.refresh_all()
 
     def _first_run_setup(self):
@@ -627,6 +736,8 @@ class MainWindow(FramelessWindow):
         self._open_folders()
 
     def closeEvent(self, e):
+        if self.watcher is not None:
+            self.watcher.stop()
         for v in list(self._viewers):
             v.close()
         super().closeEvent(e)

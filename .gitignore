@@ -1,5 +1,5 @@
 # ---- 运行数据（个人照片索引与缩略图，绝不入库）----
-data/
+/data/
 *.db
 *.db-wal
 *.db-shm
@@ -10,12 +10,15 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
-build/
-dist/
+/build/
+/dist/
 
 # ---- 开发期本地脚本（含个人路径，不发布）----
 debug_shots.py
 diag_*.py
+check_*.py
+migrate_*.py
+test_*.py
 e2e_test.py
 smoke_test.py
 ui_smoke.py

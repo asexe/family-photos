@@ -64,6 +64,19 @@ CREATE TABLE IF NOT EXISTS duplicate_items (
     photo_id INTEGER NOT NULL REFERENCES photos(id),
     PRIMARY KEY (group_id, photo_id)
 );
+
+CREATE TABLE IF NOT EXISTS trash (
+    id            INTEGER PRIMARY KEY,
+    filename      TEXT NOT NULL,
+    original_path TEXT NOT NULL,
+    trash_path    TEXT NOT NULL,
+    thumb_path    TEXT,
+    user_name     TEXT,
+    taken_at      TEXT,
+    file_size     INTEGER,
+    folder_id     INTEGER,
+    deleted_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
 """
 
 
@@ -97,6 +110,9 @@ class Database:
         cols = {r[1] for r in self._conn().execute("PRAGMA table_info(photos)")}
         if "duration" not in cols:
             self._conn().execute("ALTER TABLE photos ADD COLUMN duration REAL")
+        if "place" not in cols:
+            self._conn().execute("ALTER TABLE photos ADD COLUMN place TEXT")
+            self._conn().execute("CREATE INDEX IF NOT EXISTS idx_photos_place ON photos(place)")
 
     def close(self):
         conn = getattr(self._local, "conn", None)
@@ -205,20 +221,70 @@ class Database:
                     INSERT INTO photos(folder_id, user_id, abs_path, filename, ext,
                         content_sha256, file_size, file_mtime, width, height, orientation,
                         taken_at, timezone_offset, lat, lng, altitude,
-                        camera_make, camera_model, thumb_path, preview_path, duration)
+                        camera_make, camera_model, thumb_path, preview_path, duration, place)
                     VALUES (:folder_id, :user_id, :abs_path, :filename, :ext,
                         :content_sha256, :file_size, :file_mtime, :width, :height, :orientation,
                         :taken_at, :timezone_offset, :lat, :lng, :altitude,
-                        :camera_make, :camera_model, :thumb_path, :preview_path, :duration)""", p)
+                        :camera_make, :camera_model, :thumb_path, :preview_path, :duration,
+                        :place)""", p)
                 return cur.lastrowid, True
             c.execute("""
                 UPDATE photos SET content_sha256=:content_sha256, file_size=:file_size,
                     file_mtime=:file_mtime, width=:width, height=:height, orientation=:orientation,
                     taken_at=:taken_at, timezone_offset=:timezone_offset, lat=:lat, lng=:lng,
                     altitude=:altitude, camera_make=:camera_make, camera_model=:camera_model,
-                    thumb_path=:thumb_path, preview_path=:preview_path, duration=:duration
+                    thumb_path=:thumb_path, preview_path=:preview_path, duration=:duration,
+                    place=:place
                 WHERE abs_path=:abs_path""", p)
             return old["id"], False
+
+    # ---------- 地点 ----------
+    def places_list(self) -> list:
+        """已入库照片涉及的地点及数量（按省份归并展示用）。"""
+        rows = self._conn().execute(
+            """SELECT place, COUNT(*) AS n FROM photos
+               WHERE place IS NOT NULL AND place <> ''
+               GROUP BY place ORDER BY n DESC""").fetchall()
+        return [dict(r) for r in rows]
+
+    def photos_missing_place(self) -> list:
+        """有 GPS 但还没反查地点的照片（用于回填）。"""
+        rows = self._conn().execute(
+            """SELECT id, lat, lng FROM photos
+               WHERE lat IS NOT NULL AND lng IS NOT NULL
+                 AND (place IS NULL OR place = '')""").fetchall()
+        return [dict(r) for r in rows]
+
+    def set_place(self, photo_id: int, place: str):
+        with self._conn() as c:
+            c.execute("UPDATE photos SET place=? WHERE id=?", (place, photo_id))
+
+    # ---------- 回收站 ----------
+    def add_trash(self, entry: dict) -> int:
+        with self._conn() as c:
+            cur = c.execute("""
+                INSERT INTO trash(filename, original_path, trash_path, thumb_path,
+                                  user_name, taken_at, file_size, folder_id)
+                VALUES (:filename, :original_path, :trash_path, :thumb_path,
+                        :user_name, :taken_at, :file_size, :folder_id)""", entry)
+            return cur.lastrowid
+
+    def list_trash(self) -> list:
+        rows = self._conn().execute(
+            "SELECT * FROM trash ORDER BY id DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def get_trash(self, trash_id: int):
+        row = self._conn().execute("SELECT * FROM trash WHERE id=?", (trash_id,)).fetchone()
+        return dict(row) if row else None
+
+    def delete_trash_row(self, trash_id: int):
+        with self._conn() as c:
+            c.execute("DELETE FROM trash WHERE id=?", (trash_id,))
+
+    def clear_trash_rows(self):
+        with self._conn() as c:
+            c.execute("DELETE FROM trash")
 
     def photo_ids_by_hash(self, sha256: str) -> list:
         rows = self._conn().execute(
@@ -242,7 +308,8 @@ class Database:
 
     def query_photos(self, user_id=None, year=None, month=None, ext=None,
                      dup_only=False, has_gps=None, no_time=False, fav_only=False,
-                     video_only=False, text=None, limit=None) -> list:
+                     video_only=False, place=None, date_from=None, date_to=None,
+                     text=None, limit=None) -> list:
         sql = """SELECT p.*, u.name AS user_name, u.color AS user_color
                  FROM photos p LEFT JOIN users u ON u.id = p.user_id WHERE 1=1"""
         args = []
@@ -274,6 +341,15 @@ class Database:
             sql += " AND p.is_favorite = 1"
         if video_only:
             sql += " AND p.duration IS NOT NULL"
+        if place:
+            sql += " AND p.place = ?"
+            args.append(place)
+        if date_from:
+            sql += " AND substr(COALESCE(p.taken_at, '9999'), 1, 10) >= ?"
+            args.append(date_from)
+        if date_to:
+            sql += " AND substr(COALESCE(p.taken_at, '9999'), 1, 10) <= ?"
+            args.append(date_to)
         if no_time:
             sql += " AND p.taken_at IS NULL"
         if text:
@@ -304,6 +380,26 @@ class Database:
                 "pending_dups": pend, "per_user": per_user}
 
     # ---------- 重复组 ----------
+    def remove_missing_in_folder(self, folder_id: int, existing_paths: set) -> int:
+        """删除某数据源中磁盘上已不存在的记录，返回删除条数。"""
+        rows = self._conn().execute(
+            "SELECT id, abs_path FROM photos WHERE folder_id=?", (folder_id,)).fetchall()
+        gone = [r["id"] for r in rows if r["abs_path"] not in existing_paths]
+        if not gone:
+            return 0
+        with self._conn() as c:
+            for pid in gone:
+                c.execute("DELETE FROM duplicate_items WHERE photo_id=?", (pid,))
+                c.execute("DELETE FROM photos WHERE id=?", (pid,))
+        return len(gone)
+
+    def cleanup_empty_dup_groups(self) -> int:
+        """清理没有任何成员的重复组。"""
+        with self._conn() as c:
+            cur = c.execute("""DELETE FROM duplicate_groups
+                               WHERE id NOT IN (SELECT DISTINCT group_id FROM duplicate_items)""")
+            return cur.rowcount or 0
+
     def ensure_dup_group(self, sha256: str) -> int:
         with self._conn() as c:
             c.execute("INSERT OR IGNORE INTO duplicate_groups(hash_value) VALUES (?)", (sha256,))

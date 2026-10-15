@@ -71,17 +71,19 @@ class ScanThread(QThread):
     finished_ok = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self, scanner, folder_ids, parent=None):
+    def __init__(self, scanner, folder_ids, parent=None, clean_missing: bool = False):
         super().__init__(parent)
         self._scanner = scanner
         self._ids = list(folder_ids)
+        self._clean_missing = clean_missing
 
     def run(self):
         result = {}
         try:
             for fid in self._ids:
                 result = self._scanner.scan_folder(
-                    fid, on_progress=lambda d, t, n, p: self.progress.emit(d, t, n, p))
+                    fid, on_progress=lambda d, t, n, p: self.progress.emit(d, t, n, p),
+                    clean_missing=self._clean_missing)
                 if result.get("cancelled"):
                     break
         except Exception as e:  # noqa: BLE001

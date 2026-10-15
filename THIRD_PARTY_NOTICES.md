@@ -10,9 +10,17 @@
 | Leaflet 1.9.4 | `app/map/vendor/leaflet.js`, `leaflet.css` | BSD-2-Clause |
 | Leaflet.markercluster 1.5.3 | `app/map/vendor/leaflet.markercluster.js`, `MarkerCluster*.css` | MIT |
 | Font Awesome Free 6.5.2（图标 SVG） | `app/ui/icons/*.svg` | 图标：CC BY 4.0；字体：SIL OFL 1.1；代码：MIT |
+| GeoNames 城市数据（衍生） | `app/data/cities.txt` | CC BY 4.0 |
+| 中国行政区划名称（衍生） | `app/data/cities.json`, `provinces.json` | MIT（来源 88250/city-geo） |
+
+`app/data/cities.txt` 由 `tools/build_places.py` 从 GeoNames 城市库（CC BY 4.0）
+与中国行政区划名称数据合成，仅保留「坐标 + 城市名 + 省份 + 国家」字段。
 
 Font Awesome 官方要求署名，本项目在 README 与界面说明中标注：
 > Icons by [Font Awesome Free](https://fontawesome.com) (CC BY 4.0)
+
+GeoNames 要求署名：
+> This product includes data from [GeoNames](https://www.geonames.org/), licensed under CC BY 4.0.
 
 ## 运行期依赖（通过 pip 安装，不随仓库分发）
 

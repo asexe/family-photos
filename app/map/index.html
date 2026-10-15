@@ -183,7 +183,8 @@
       rows.forEach(function (p) {
         var m = L.marker([p.lat, p.lng], {
           icon: singleIcon(p), thumb: p.thumb, color: p.color, pid: p.id,
-          title: (p.user || '未知') + ' · ' + (p.taken ? p.taken.slice(0, 10) : '')
+          title: (p.place ? p.place + ' · ' : '') + (p.user || '未知') + ' · ' +
+                 (p.taken ? p.taken.slice(0, 10) : '')
         });
         m.on('click', function () { window.location.href = 'photo://open/' + p.id; });
         var key = p.user || '未知';

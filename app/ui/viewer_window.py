@@ -177,8 +177,10 @@ class ViewerWindow(FramelessWindow):
         info = []
         if p.get("taken_at"):
             info.append("📅 " + p["taken_at"])
+        if p.get("place"):
+            info.append("📍 " + p["place"])
         if p.get("lat") is not None:
-            info.append(f"📍 {p['lat']:.5f}, {p['lng']:.5f}")
+            info.append(f"({p['lat']:.5f}, {p['lng']:.5f})")
         if p.get("camera_model"):
             info.append("📷 " + p["camera_model"])
         if p.get("width"):
