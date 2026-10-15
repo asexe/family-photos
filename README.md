@@ -49,7 +49,7 @@
 环境要求：Windows 10/11，Python 3.10+（推荐 3.12）
 
 ```bash
-git clone https://github.com/lc13500024356/family-photos.git
+git clone https://github.com/asexe/family-photos.git
 cd family-photos
 python -m pip install -r requirements.txt
 python main.py
